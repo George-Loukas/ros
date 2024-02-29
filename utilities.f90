@@ -38,6 +38,7 @@ module utilities
         write (*,'(a,I7)') "   # Panels    : ", config%num_panels
         write (*,'(a,I7)') "   # Triangles : ", config%num_triangles
         write (*,'(a,I7)') "   # Quads     : ", config%num_quads
+        write (*,'(a,I7)') "   # Marked    : ", config%mum_marked
         call print_separ_line()
     end subroutine print_settings
 

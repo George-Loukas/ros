@@ -2,14 +2,14 @@ module geometry
     use constants
     implicit none
     type panel_
-        real(8), dimension(4,3) :: point = 0.d0
-        integer, dimension(4)   :: mark = 0
-        real(8), dimension(3)   :: centroid
-        real(8), dimension(3)   :: normal
-        real(8), dimension(3)   :: long
-        real(8), dimension(3)   :: tang
-        real(8)                 :: ds
-        integer                 :: section = 0
+        real(8), dimension(4,3) :: point    = 0.d0
+        integer, dimension(4)   :: mark     = 0
+        real(8), dimension(3)   :: centroid = 0.d0
+        real(8), dimension(3)   :: normal   = 0.d0
+        real(8), dimension(3)   :: long     = 0.d0
+        real(8), dimension(3)   :: tang     = 0.d0
+        real(8)                 :: ds       = 0.d0
+        integer                 :: section  = 0
         logical                 :: is_triangle = .false.
 
     contains
@@ -17,6 +17,12 @@ module geometry
         procedure :: get_centroid     => get_centroid
         procedure :: get_vectors      => get_vectors
     end type panel_
+
+    type wake_panel
+        real(8), dimension(4,3) :: point    = 0.d0
+        integer, dimension(4)   :: mark     = 0
+        real(8)                 :: cw       = 0.d0
+    end type wake_panel
     contains
 
 

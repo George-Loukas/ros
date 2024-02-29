@@ -5,18 +5,16 @@ program main
     use geometry
     implicit none
     type(setting) :: config
-    type(panel_) , allocatable :: panel(:)
+    type(panel_)    , allocatable :: panel(:)
+    type(wake_panel), allocatable :: wpanel(:)
     integer :: iteration = 0, npw = 0
     real    :: Tstart, Tend
     real(8) :: lift = 0.d0, prev_lift = 0.d0, drag = 0.d0, error = 1.d0
     integer :: idx_conv = 0
     real(8), allocatable, dimension(:,:) :: A
-    real(8), allocatable, dimension(:)   :: B,C
-    real(8), allocatable, dimension(:)   :: X1X,Y1Y,Z1Z
+    real(8), allocatable, dimension(:)   :: B
 
-    real(8), allocatable, dimension(:,:) :: x_wake,y_wake,z_wake
-    integer, allocatable, dimension(:,:) :: cw, icw
-    integer, allocatable, dimension(:)   :: markw, ipropw
+
     ! Starting Timer
     call cpu_time(Tstart)
 
@@ -28,54 +26,46 @@ program main
     ! Allocating A B matrices
     allocate(A(config%num_panels,config%num_panels))
     allocate(B(config%num_panels))
-    allocate(C(config%num_panels))
     ! Allocating the Wake
-    allocate(x_wake(max_iterations,config%num_panels))   ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(y_wake(max_iterations,config%num_panels))   ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(z_wake(max_iterations,config%num_panels))   ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(cw(max_iterations,config%num_panels))       ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(icw(config%num_panels,2))                   ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(markw(config%num_panels))                   ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
-    allocate(ipropw(config%num_panels))                  ! Maybe it doesnt need to be that big. Only the selected points from trailing edge
+    allocate(wpanel(max_iterations))
     write (*,'(a)') 'Allocation Success'
 
 
-    !call geometry_init()
+    call geometry_init()
     call print_settings(config)
 
     ! Zero Iteration - Preparation for main Loop
-    !call vorcalc()
+    call vorcalc()
+    call print_update_info()
     
     ! First iteration
     iteration = 1
-    call print_update_info()
-    !call wake
+    call wake()
     !CALL NEIBORG(NPAN,NGW)
-    !CALL WAKREL(ITER,NPAN,NGW,NPW,DT,NSYM,NGRND)
+    CALL wake_relaxation()
     !CALL WAKINT(NPW,ITER)
-    !call vorcalc()
+    call vorcalc()
 
     prev_lift = lift
-    !call airload()
-    call print_update_info()
+    call airload()
     call check_convergence()
+    call print_update_info()
     iteration = iteration + 1
 
     do while (iteration<=max_iterations.and. idx_conv /= 1)
-        !call wake
+        call wake()
         !CALL WAKINT(NPW,ITER)
         !CALL WAKCOR(NPAN,NGW,ITER)
-        !cALL WAKREL(ITER,NPAN,NGW,NPW,DT,NSYM,NGRND)
+        cALL wake_relaxation()
         !CALL WAKINT(NPW,ITER)
         !CALL WAKCOR(NPAN,NGW,ITER)
-        !call vorcalc()
+        call vorcalc()
         prev_lift = lift
-        !call airload()
-        call print_update_info()
+        call airload()
         call check_convergence()
+        call print_update_info()
         iteration = iteration + 1
     end do
-
     ! Stop Timer/Print Results
     call cpu_time(Tend)
     write (*,'(a,f10.2,a)') 'Execution time : ', Tend - Tstart, 's'
@@ -132,7 +122,8 @@ program main
         end do
 
         format = '(6I10)'
-        triangle_sum = 0    ! counts triangles
+        triangle_sum = 0                 ! counts triangles
+        config%mum_marked = sum(mark)    ! counts marked
         do i = 1, config%num_panels
             
             read (30,format) j, temp1,temp2,temp3,temp4, panel(i)%section
@@ -149,8 +140,13 @@ program main
             k = abs(temp4)
             panel(i)%point(4,1) = xyz(k,1); panel(i)%point(4,2) = xyz(k,2); panel(i)%point(4,3) = xyz(k,3);
             if (mark(k) == 1) panel(i)%mark(4) = 1
-            if (temp3 == temp4) panel(i)%is_triangle = .true.
-            if (panel(i)%is_triangle) triangle_sum = triangle_sum + 1
+
+            if (temp3 == temp4) then
+                panel(i)%is_triangle = .true.
+                triangle_sum = triangle_sum + 1
+            end if
+            
+
 
             call panel(i)%move_panel(config%beta,config%alpha,config%gamma,config%flight_height,config%idx_ground_eff)
             call panel(i)%get_centroid()
@@ -172,6 +168,10 @@ program main
         real(8) :: vvx = 0.d0, vvy = 0.d0, vvz = 0.d0
         real(8) :: invz = 1.d0, invy= 1.d0
         real(8) :: VAIP = 0.d0
+        real    :: T_start = 0.d0, T_end = 0.d0
+
+        ! Start Timer
+        call cpu_time(T_start)
 
         
         if (iteration > 0) then ! not the first iteration
@@ -222,8 +222,10 @@ program main
                 B(i) = - (config%vinit) * panel(i)%normal(1) + VAIP
             end do
         end if
-        C = B
-        call solve_axb(A,config%num_panels,C)
+        call solve_axb(A,config%num_panels,B)
+        ! Stop Timer/Print Results
+        call cpu_time(T_end)
+        write (*,'(a,f10.5,a)') 'VorCalc      : ', T_end - T_start, 's'
     end subroutine vorcalc
 
     ! Subroutine to calculate velocity components (VX, VY, VZ) due to a vortex ring
@@ -312,36 +314,40 @@ program main
         end do
     end subroutine vortex
 
-    subroutine velwak(gx,gy,gz,xvv,yvv,zvv)
+    subroutine velwak(gx,gy,gz,vx,vy,vz)
         implicit none
-
+    
         real(8), intent(in)     :: gx,gy,gz
-        real(8), intent(inout)  :: xvv,yvv,zvv
+        real(8), intent(inout)  :: vx,vy,vz
         real(8)                 :: vvx,vvy,vvz
         real(8), dimension(4)   :: xx,yy,zz
         real(8) :: invz = 1.d0, invy= 1.d0
-
-
+    
+    
         integer :: NG,NA
         integer :: IK,JK
-
+    
         NG = 0; invz = 1.d0 ! if NG =0 we do not invert the Z (for ground effect)
-        xvv=0.d0; yvv=0.d0; zvv=0.d0
-
+        vx=0.d0; vy=0.d0; vz=0.d0
+    
         do while (.true.) 
             do IK = 1, iteration
                 do JK = 1, NPW
                     NA=0; invy = 1.d0 ! if NA = 0 we do not invert the Y (for symmetry)
-
-                    xx = [x_wake(IK,ICW(JK,1)), x_wake(IK,ICW(JK,2)), x_wake(IK+1,ICW(JK,2)), x_wake(IK+1,ICW(JK,1))]
-                    yy = [y_wake(IK,ICW(JK,1)), y_wake(IK,ICW(JK,2)), y_wake(IK+1,ICW(JK,2)), y_wake(IK+1,ICW(JK,1))]
-                    zz = [z_wake(IK,ICW(JK,1)), z_wake(IK,ICW(JK,2)), z_wake(IK+1,ICW(JK,2)), z_wake(IK+1,ICW(JK,1))]
-
+    
+                    !xx = [x_wake(IK,ICW(JK,1)), x_wake(IK,ICW(JK,2)), x_wake(IK+1,ICW(JK,2)), x_wake(IK+1,ICW(JK,1))]
+                    !yy = [y_wake(IK,ICW(JK,1)), y_wake(IK,ICW(JK,2)), y_wake(IK+1,ICW(JK,2)), y_wake(IK+1,ICW(JK,1))]
+                    !zz = [z_wake(IK,ICW(JK,1)), z_wake(IK,ICW(JK,2)), z_wake(IK+1,ICW(JK,2)), z_wake(IK+1,ICW(JK,1))]
+                    xx = wpanel(IK)%point(:,1)
+                    yy = wpanel(IK)%point(:,2)
+                    zz = wpanel(IK)%point(:,3)
                     do while (.true.) !51
-                        call vortex(gx,gy,gz,xx,yy,zz,vvx,vvy,vvz)
-                        XVV=XVV+VVX*CW(IK,JK)*((-1)**NA)*(-1)**NG
-                        YVV=YVV+VVY*CW(IK,JK)*((-1)**NA)*(-1)**NG
-                        ZVV=ZVV+VVZ*CW(IK,JK)*((-1)**NA)*(-1)**NG
+                        call vortex(gx,gy,gz,xx,invy*yy,invz*zz,vvx,vvy,vvz)
+
+                        vx = vx + vvx*wpanel(IK)%cw*((-1)**NA)*(-1)**NG
+                        vy = vy + vvy*wpanel(IK)%cw*((-1)**NA)*(-1)**NG
+                        vz = vz + vvz*wpanel(IK)%cw*((-1)**NA)*(-1)**NG
+
                         if ((config%idx_symm == 0).or.(NA == 1)) exit ! go to the next j panel
                             NA = 1; invy = - invy ! When NA is 1 we invert the Y (symmetry)
                     end do
@@ -351,5 +357,201 @@ program main
             NG = 1; invz = - invz ! When NG = 1 we invert the Z (for ground effect)
         end do
     end subroutine velwak
+
+    subroutine wake()
+        implicit none
+        integer :: i, j, k, p1, p2
+        real(8) :: VxDT
+        logical, allocatable :: checked(:) ! Logical matrices take up smaller memory instead of integers
+        logical :: found_edge = .false.
+        real    :: T_start = 0.d0, T_end = 0.d0
+
+        ! Start Timer
+        call cpu_time(T_start)
+
+        VxDT = config%vinit*config%dt ! V*DT, just to simplify equations
+
+        if (.not.allocated(checked)) then
+            allocate(checked(config%num_panels))
+            checked = .false.
+        end if
+
+        do i = 1,config%num_panels ! Loop all panels
+            if (checked(i)) cycle ! If the panel is processed skip it
+
+            do j = 1,4  ! Loop all points of the panel
+                found_edge = .false.!flag to mark the panel checked (not marked edge)
+                p1 = j; p2 = j + 1  ! p1 : idx of 1 point and p2 : idx of the next point
+                if (p2 == 5) p2 = 1 ! resets to 1st point
+
+                if (panel(i)%mark(p1)==1.and.panel(i)%mark(p2)==1) then ! This means the current edge (p1->p2) is marked
+                    found_edge = .true.
+                    ! WORKING ON THE MARKED EDGE
+                    if (iteration<=1) then ! First time wake is created                                         wakep1
+                        wpanel(iteration)%point(1,:) = panel(i)%point(p1,:)     !    p1 .          wakep4 .--------.
+                        wpanel(iteration)%point(2,:) = panel(i)%point(p2,:)     !           =>           /        /
+                        wpanel(iteration)%point(3,:) = panel(i)%point(p2,:)     !           =>          /        /  
+                        wpanel(iteration)%point(4,:) = panel(i)%point(p1,:)     !    p2 .       wakep3 .--------.
+                        ! Also adding the movement to the x direction caused by Vinit x DT                  wakep 2
+                        wpanel(iteration)%point(1,1) = wpanel(iteration)%point(1,1) + VxDT
+                        wpanel(iteration)%point(2,1) = wpanel(iteration)%point(2,1) + VxDT
+
+                        wpanel(iteration)%cw = -B(i)
+                    else
+                        do k = iteration,2,-1 
+                            ! The next iteration's panel becomes first in line and the previous iteration move back by 1
+                            wpanel(k)%point(1,:) = wpanel(k-1)%point(1,:)
+                            wpanel(k)%point(2,:) = wpanel(k-1)%point(1,:)
+                            wpanel(k)%point(3,:) = wpanel(k-1)%point(4,:)
+                            wpanel(k)%point(3,:) = wpanel(k-1)%point(4,:)
+                            ! Also adding the movement to the x direction caused by Vinit x DT
+                            wpanel(k)%point(:,1) = wpanel(k-1)%point(:,1) + VxDT
+                            wpanel(k)%point(:,1) = wpanel(k-1)%point(:,1) + VxDT
+
+                            wpanel(k)%cw = wpanel(k-1)%cw
+                        end do
+                        ! Updating again the first row of wake
+                        wpanel(1)%point(1,:) = panel(i)%point(p1,:)     !    p1 .       wakep4 .    wakep 1 .
+                        wpanel(1)%point(2,:) = panel(i)%point(p2,:)     !           =>
+                        wpanel(1)%point(3,:) = panel(i)%point(p2,:)     !           =>
+                        wpanel(1)%point(4,:) = panel(i)%point(p1,:)     !    p2 .       wakep3 .    wakep 2 .
+
+                    end if
+                end if
+            end do
+            if (.not.found_edge) checked(i) = .true.
+        end do
+        ! Stop Timer/Print Results
+        call cpu_time(T_end)
+        write (*,'(a,f10.5,a)') 'Wake         : ', T_end - T_start, 's'
+        !deallocate(checked)
+    end subroutine wake
+
+    subroutine wake_relaxation() 
+        implicit none
+        integer :: i, j
+
+        real(8) :: gx,gy,gz,vx,vy,vz,vvx,vvy,vvz
+        real(8), allocatable :: S_vx(:,:), S_vy(:,:), S_vz(:,:)
+
+        if (iteration == 0) return
+
+        allocate(S_vx(iteration,4),S_vy(iteration,4),S_vz(iteration,4))
+
+        do i =1, iteration
+            do j = 1, 4
+                
+                gx = wpanel(i)%point(j,1) 
+                gy = wpanel(i)%point(j,2) 
+                gz = wpanel(i)%point(j,3) 
+                call velpan(gx,gy,gz,vvx,vvy,vvz) 
+                call velwak(gx,gy,gz,vx,vy,vz)
+                S_vx(i,j) = vvx + vx
+                S_vy(i,j) = vvy + vy
+                S_vz(i,j) = vvz + vz
+            end do
+        end do
+        do i =1, iteration
+            do j = 1, 4
+                wpanel(i)%point(j,1) = wpanel(i)%point(j,1) + S_vx(i,j)*config%dt
+                wpanel(i)%point(j,2) = wpanel(i)%point(j,2) + S_vy(i,j)*config%dt
+                wpanel(i)%point(j,2) = wpanel(i)%point(j,2) + S_vz(i,j)*config%dt
+            end do
+        end do
+
+        deallocate(S_vx,S_vy,S_vz)
+    end subroutine wake_relaxation
+
+    subroutine velpan(gx,gy,gz,xvv,yvv,zvv)
+        implicit none
+        real(8), intent(in)     :: gx,gy,gz
+        real(8), intent(inout)  :: xvv,yvv,zvv
+        real(8)                 :: vvx,vvy,vvz
+        real(8)                 :: invz = 1.d0, invy= 1.d0
+        integer                 :: i = 0, NG = 0, NA = 0
+
+        xvv=0.d0; yvv=0.d0; zvv=0.d0
+        NG = 0; invz = 1.d0 ! if NG =0 we do not invert the Z (for ground effect)
+        do while (.true.)
+            do i = 1, config%num_panels
+                NA=0; invy = 1.d0 ! if NA = 0 we do not invert the Y (for symmetry)
+                do while (.true.)
+                    call vortex(gx,gy,gz,                      &
+                            &            panel(i)%point(:,1),  &
+                            &       invy*panel(i)%point(:,2),  &
+                            &       invz*panel(i)%point(:,3),  &
+                            & vvx,vvy,vvz)
+                    xvv = xvv+vvx*B(i)*((-1)**NA)*(-1)**NG
+                    yvv = yvv+vvy*B(i)*((-1)**NA)*(-1)**NG
+                    zvv = zvv+vvz*B(i)*((-1)**NA)*(-1)**NG
+                    if ((config%idx_symm == 0).or.(NA == 1)) exit ! go to the next j panel
+                    NA = 1; invy = - invy ! When NA is 1 we invert the Y (symmetry)
+                end do
+            end do
+            if ((config%idx_ground_eff == 0).or.(NG == 1)) exit
+            NG = 1; invz = - invz ! When NG = 1 we invert the Z (for ground effect)
+        end do
+    end subroutine velpan
+
+    subroutine airload()
+        use constants
+        implicit none
+      
+        real(8) :: kn = 0
+        integer :: i, j, kki, kkj, ik, jk, ip(2), kp
+        real(8) :: xvv, yvv, zvv, dx, dy, dz, rc, roc, side, invy
+      
+        lift = 0.d0; drag = 0.d0
+        kn = 0; invy = 1.d0
+        do while (.true.)
+          do i = 1, config%num_panels
+            kki = 4
+            if (panel(i)%is_triangle) kki = 3
+      
+            do j = 1, config%num_panels
+              if (j == i) cycle
+      
+              kkj = 4
+              if (panel(j)%is_triangle) kkj = 3
+      
+              kp = 0
+              do ik = 1, kki
+                do jk = 1, kkj
+                  if (all(panel(i)%point(:,ik) .ne. panel(j)%point(:,jk))) then
+                    cycle
+                  end if
+                  kp = kp + 1
+                  ip(kp) = ik
+                  if (kp == 2) exit
+                end do
+              end do
+      
+              if (kp == 2 .and. all(panel(i)%mark(ip) .eq. 1)) then
+                exit
+              end if
+      
+              dx = panel(i)%point(ip(2), 1) - panel(i)%point(ip(1), 1)
+              dy = panel(i)%point(ip(2), 2) - panel(i)%point(ip(1), 2)
+              dz = panel(i)%point(ip(2), 3) - panel(i)%point(ip(1), 3)
+      
+              ! Implement logic for symmetry (as in original code using NSYM and KN)
+      
+              roc = rho * (B(i) - B(j)) * config%vinit / 2.d0
+              rc = rho * (B(i) - B(j))
+      
+              side = side - roc * dz
+              lift = lift + roc * dy
+      
+              call velwak(panel(i)%centroid(1), panel(i)%centroid(2), panel(i)%centroid(3), &
+                    &     xvv, yvv, zvv)
+              drag = drag - rc * (xvv * dy - yvv * dx)
+            end do
+          end do
+          if ((config%idx_symm == 0).or.(kn == 1)) exit ! go to the next j panel
+          kn = 1; invy = - invy ! When NA is 1 we invert the Y (symmetry)
+        end do
+      end subroutine airload
+      
+
 
 end program main
